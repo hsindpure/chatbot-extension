@@ -1,702 +1,1012 @@
+
 define([
-  "qlik",
-  "jquery"
-], function (qlik, $) {
-  "use strict";
+    'jquery',
+    'qlik',
+    './properties',
+    'text!./template.html',
+    'text!./style.css',
+    'text!./data.json',
+	 'https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js',
+ // ECharts CDN
+, // XLSX Library
+], function($, qlik, props, template, cssContent, jsonData, echarts) {
+    'use strict';
 
-  // *********** Replace with your OpenAI API Key *************
-  const OPENAI_API_KEY = "<YOUR_OPENAI_API_KEY>";
-  // **********************************************************
+    // Add CSS to document head
+    $('<style>').html(cssContent).appendTo('head');
+    var dataObj = JSON.parse(jsonData);
+    console.log(dataObj);
+	
 
-  // Utility: jsPDF CDN loader for PDF export
-  function loadJsPDF() {
-    return new Promise((resolve, reject) => {
-      if (window.jspdf) {
-        resolve(window.jspdf);
-        return;
-      }
-      let script = document.createElement("script");
-      script.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
-      script.onload = () => resolve(window.jspdf);
-      script.onerror = () => reject(new Error("Failed to load jsPDF"));
-      document.head.appendChild(script);
-    });
-  }
+    return {
+        template: template,
+        definition: props,
+        controller: ['$scope', '$element', function($scope, $element) {
+            const app = qlik.currApp();
+            let MainData = [];
+            let hypercubeData = {};
+            let chatHistory = [];
+            let currentUser = 'User';
+            let selectedRole = 'Analyst';
+            let isListening = false;
+            let recognition;
+            let chartInstances = {}; // Track chart instances for cleanup
+            let currentChartType = null; // Track the current chart type
+            let currentChartContainerId = null; // Track the current chart container ID
+            let lastChartConfig = null; // Store the last chart configuration
+            let previousChartConfig = null; // Store the previous chart configuration for "Go Back"
+            let chartcontainerheader = null;
 
-  return {
-    initialProperties: {},
-    definition: {
-      type: "items",
-      component: "accordion",
-      items: {
-        settings: {
-          uses: "settings"
-        }
-      }
-    },
-    support: {
-      snapshot: true,
-      export: true,
-      exportData: true
-    },
+            let sursa = [];
+            let allObjData = [];
 
-    paint: async function ($element, layout) {
-      var self = this;
-      var app = qlik.currApp();
+            // Chart-related keywords for detection
+            const chartKeywords = ['chart', 'show chart', 'create chart', 'visualization', 'graph', 'plot', 'diagram', 'visual', 'trend', 'bar chart', 'line chart', 'pie chart', 'scatter plot', 'bar', 'line', 'pie', 'scatter', 'stacked bar', 'area', 'boxplot', 'radar', 'geo', 'tree', 'treemap', 'sankey', 'funnel', 'gauge'];
 
-      // Remove previous chatbot container if exists
-      $element.empty();
-
-      // Insert HTML structure into the extension container:
-      // Because Qlik Sense extension does not load external HTML file natively,
-      // you can place the entire chatbot-extension.html content here or load dynamically.
-      // For now, I assume you'll load chatbot-extension.html content into the container by your own mechanism.
-      // If you want, you can do ajax load or inject HTML string here.
-
-      // For demonstration, inject HTML directly here (from chatbot-extension.html file content):
-
-      const html = `
-        <div id="qs-chatbot-icon" title="Chatbot">
-          <svg viewBox="0 0 24 24"><path d="M12 3C7.03 3 3 6.58 3 11c0 1.54.78 2.97 2.21 4.09L4 19l4.94-1.44A9.306 9.306 0 0 0 12 20c4.97 0 9-3.58 9-8s-4.03-9-9-9zM10 11v2H8v-2h2zm4 0v2h-2v-2h2z"/></svg>
-        </div>
-        <div id="qs-chatbot-container" aria-live="polite" aria-atomic="true" role="dialog" tabindex="0" aria-label="Chatbot Window" >
-          <div id="qs-chatbot-header">
-            <button type="button" aria-label="Close Chatbot" class="close-btn">&times;</button>
-            <div class="app-name"></div>
-          </div>
-          <select id="role-select" aria-label="Select your role">
-            <option value="analyst">Role: Analyst</option>
-            <option value="hr">Role: HR</option>
-            <option value="guest">Role: Guest</option>
-          </select>
-          <div id="qs-chatbot-body"></div>
-          <button id="download-chat-btn" aria-label="Download chat history as PDF">Download Chat History (PDF)</button>
-          <div class="chat-input-area" role="form" aria-label="Chat input area">
-            <input type="text" placeholder="Ask your question..." aria-label="Chat input" autocomplete="off" />
-            <button type="button" aria-label="Voice input" title="Voice input (hold to talk)">
-              <svg viewBox="0 0 24 24"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 14 0h-2zM12 19v3m-4 0h8"/></svg>
-            </button>
-            <button type="button" aria-label="Send message" title="Send message">
-              <svg viewBox="0 0 24 24"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
-            </button>
-          </div>
-        </div>
-      `;
-
-      $element.append(html);
-
-      // Append CSS dynamically into head (Remove this if you load CSS externally)
-      var style = `
-        /* Paste the full CSS content from chatbot-extension.css here to make inline styles if needed */
-        #qs-chatbot-icon {
-          position: fixed;
-          bottom: 25px;
-          right: 25px;
-          width: 60px;
-          height: 60px;
-          background: #0078d4;
-          border-radius: 50%;
-          cursor: pointer;
-          box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-          z-index: 1300;
-          display: flex;
-          justify-content: center;
-          align-items: center;
-          transition: background-color 0.3s ease;
-        }
-        #qs-chatbot-icon:hover {
-          background: #005a9e;
-        }
-        #qs-chatbot-icon svg {
-          fill: white;
-          width: 28px;
-          height: 28px;
-        }
-        #qs-chatbot-container {
-          position: fixed;
-          bottom: 100px;
-          right: 25px;
-          width: 380px;
-          max-height: 500px;
-          background: white;
-          border-radius: 10px;
-          box-shadow: 0 0 15px rgba(0,0,0,0.25);
-          display: flex;
-          flex-direction: column;
-          font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
-          opacity: 0;
-          transform: translateY(40px);
-          transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-          z-index: 1300;
-          overflow: hidden;
-        }
-        #qs-chatbot-container.open {
-          opacity: 1;
-          transform: translateY(0);
-        }
-        #qs-chatbot-header {
-          background: #0078d4;
-          color: white;
-          padding: 10px 15px;
-          font-weight: 700;
-          font-size: 1.2em;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          user-select: none;
-        }
-        #qs-chatbot-header .app-name {
-          flex: 1;
-          text-align: center;
-          font-weight: 700;
-          font-size: 1.2em;
-        }
-        #qs-chatbot-header button.close-btn {
-          background: transparent;
-          border: none;
-          color: white;
-          font-size: 1.4em;
-          cursor: pointer;
-          user-select: none;
-        }
-        #qs-chatbot-body {
-          flex: 1;
-          padding: 10px 15px;
-          background: #f7f7f7;
-          overflow-y: auto;
-        }
-        .chat-message {
-          margin-bottom: 12px;
-          max-width: 90%;
-          clear: both;
-        }
-        .chat-message.user {
-          float: right;
-          background: #0078d4;
-          color: white;
-          border-radius: 15px 15px 0 15px;
-          padding: 8px 12px;
-          font-size: 0.9em;
-          position: relative;
-          word-wrap: break-word;
-        }
-        .chat-message.bot {
-          float: left;
-          background: #e1e1e1;
-          color: #222;
-          border-radius: 15px 15px 15px 0;
-          padding: 8px 12px;
-          font-size: 0.9em;
-          position: relative;
-          word-wrap: break-word;
-        }
-        .chat-message .author-info {
-          font-size: 0.75em;
-          font-weight: 600;
-          margin-bottom: 3px;
-          display: flex;
-          align-items: center;
-        }
-        .chat-message .author-info img {
-          width: 20px;
-          height: 20px;
-          border-radius: 50%;
-          margin-right: 6px;
-        }
-        .chat-input-area {
-          display: flex;
-          padding: 8px 10px;
-          background: #fff;
-          border-top: 1px solid #ddd;
-        }
-        .chat-input-area input[type="text"] {
-          flex: 1;
-          border: 1px solid #ddd;
-          border-radius: 20px;
-          padding: 8px 15px;
-          font-size: 1em;
-          outline: none;
-          transition: border-color 0.3s ease;
-        }
-        .chat-input-area input[type="text"]:focus {
-          border-color: #0078d4;
-        }
-        .chat-input-area button {
-          background: #0078d4;
-          border: none;
-          color: white;
-          margin-left: 8px;
-          border-radius: 50%;
-          width: 36px;
-          height: 36px;
-          cursor: pointer;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          transition: background-color 0.3s ease;
-          user-select: none;
-          outline: none;
-        }
-        .chat-input-area button:hover {
-          background: #005a9e;
-        }
-        .chat-input-area button svg {
-          width: 20px;
-          height: 20px;
-          fill: white;
-        }
-        #role-select {
-          margin: 5px 15px 10px 15px;
-          font-size: 1em;
-          padding: 5px 8px;
-          border-radius: 5px;
-          border: 1px solid #ddd;
-          width: calc(100% - 40px);
-          outline: none;
-          transition: border-color 0.3s ease;
-        }
-        #role-select:focus {
-          border-color: #0078d4;
-        }
-        #download-chat-btn {
-          background: #0078d4;
-          border: none;
-          color: white;
-          margin: 10px 15px;
-          padding: 8px 12px;
-          font-weight: 600;
-          border-radius: 6px;
-          cursor: pointer;
-          user-select: none;
-          outline: none;
-          transition: background-color 0.3s ease;
-          width: calc(100% - 30px);
-        }
-        #download-chat-btn:hover {
-          background: #005a9e;
-        }
-      `;
-      $("<style>").html(style).appendTo("head");
-
-      // Cache selectors
-      var chatbotIcon = $element.find("#qs-chatbot-icon");
-      var container = $element.find("#qs-chatbot-container");
-      var chatbotBody = $element.find("#qs-chatbot-body");
-      var inputBox = $element.find("input[type=text]");
-      var sendBtn = $element.find("button[aria-label='Send message']");
-      var voiceBtn = $element.find("button[aria-label='Voice input']");
-      var closeBtn = $element.find("button.close-btn");
-      var roleSelect = $element.find("#role-select");
-      var downloadBtn = $element.find("#download-chat-btn");
-
-      // Store chat messages as array of {role:'user'|'bot', text:'', timestamp, userName}
-      var chatHistory = [];
-
-      // User info
-      var userName = qlik.navigation.getEffectiveUserId ? qlik.navigation.getEffectiveUserId() : "User";
-
-      // Simulated user icon (can be customized)
-      var userIconUrl = "https://cdn-icons-png.flaticon.com/512/147/147144.png";
-
-      // Fill app name in header
-      try {
-        var appLayout = await app.getAppLayout();
-        container.find(".app-name").text(appLayout.qTitle || "Qlik Sense Chatbot");
-      } catch (e) {
-        container.find(".app-name").text("Qlik Sense Chatbot");
-      }
-
-      // Smooth scroll function to keep chat scroll on bottom
-      function scrollChatBottom() {
-        chatbotBody.stop().animate({ scrollTop: chatbotBody[0].scrollHeight }, 300);
-      }
-
-      // Append chat message bubble
-      function appendMessage(text, sender = "bot", customUserName) {
-        var authorName = sender === "user" ? (customUserName || userName) : "Chatbot";
-        var isUser = sender === "user";
-        var msg = $(`
-          <div class="chat-message ${sender}" role="article" aria-label="${authorName} says: ${text}">
-            <div class="author-info">
-              <img src="${isUser ? userIconUrl : 'https://cdn-icons-png.flaticon.com/512/4712/4712027.png'}" alt="${authorName}"/>
-              <span>${authorName}</span>
-            </div>
-            <div class="message-text"></div>
-          </div>
-        `);
-        msg.find(".message-text").text(text);
-        chatbotBody.append(msg);
-        scrollChatBottom();
-        chatHistory.push({ role: sender, text: text, timestamp: new Date(), userName: authorName });
-      }
-
-      // Show loading indicator in chat
-      function showLoading() {
-        var loader = $(`
-          <div class="chat-message bot loading-message" aria-live="polite" aria-atomic="true" style="color:#666;font-style:italic;">
-            Chatbot is typing...
-          </div>
-        `);
-        chatbotBody.append(loader);
-        scrollChatBottom();
-        return loader;
-      }
-
-      // Remove loading indicator
-      function removeLoading(loader) {
-        if (loader) loader.remove();
-      }
-
-      // Toggle chatbot container open/close with animation
-      function toggleChatbot(show) {
-        if (show) {
-          container.addClass("open");
-          inputBox.focus();
-        } else {
-          container.removeClass("open");
-        }
-      }
-
-      // Chatbot icon click toggles container
-      chatbotIcon.on("click", function () {
-        if (container.hasClass("open")) {
-          toggleChatbot(false);
-        } else {
-          toggleChatbot(true);
-        }
-      });
-
-      // Close button hides chatbot
-      closeBtn.on("click", function () {
-        toggleChatbot(false);
-      });
-
-      // Function: Fetch all objects data from app (with paging to limit rows) - returns data summary object
-      async function fetchAllObjectsData() {
-        let resultData = [];
-        try {
-          // Get list of all visualization objects in app
-          let appsObjects = await app.getObjectList("visualization");
-
-          for (let obj of appsObjects.qAppObjectList.qItems) {
-            try {
-              let model = await app.getObject(obj.qInfo.qId);
-              let layout = await model.getLayout();
-
-              if (
-                layout.qHyperCube &&
-                layout.qHyperCube.qSize.qcy > 0 &&
-                layout.qHyperCube.qMeasureInfo.length > 0
-              ) {
-                let qTop = 0;
-                let qHeight = Math.min(layout.qHyperCube.qSize.qcy, 30); // Limit rows to 30
-                let qWidth = layout.qHyperCube.qSize.qcx;
-
-                let pageDef = [{ qTop, qLeft: 0, qHeight, qWidth }];
-                let dataPages = await model.getHyperCubeData("/qHyperCubeDef", pageDef);
-
-                resultData.push({
-                  id: layout.qInfo.qId,
-                  title: layout.title || layout.qInfo.qId,
-                  columns: layout.qHyperCube.qDimensionInfo.concat(layout.qHyperCube.qMeasureInfo).map(f => f.qFallbackTitle),
-                  data: dataPages[0].qMatrix
-                });
-              }
-            } catch (exObj) {
-              // continue
+            // Initialize Speech Recognition
+            if ('webkitSpeechRecognition' in window) {
+                recognition = new webkitSpeechRecognition();
+                recognition.continuous = false;
+                recognition.interimResults = false;
+                recognition.lang = 'en-US';
             }
-          }
-        } catch (e) {
-          return null;
-        }
-        return resultData;
-      }
 
-      // Function: Simple Data Comparison (Qlik app data vs external data simulation)
-      function compareMarketData(appData, userQuery) {
-        const marketData = {
-          "sales growth": "The external market indicates a 5% increase in sales compared to last quarter.",
-          "employee attrition": "Industry average attrition rate stands at 12%, while your app shows 8%.",
-          "customer satisfaction": "Market surveys report customer satisfaction of 85%, your app reports 87%."
-        };
-
-        for (let key in marketData) {
-          if (userQuery.toLowerCase().includes(key)) {
-            return marketData[key];
-          }
-        }
-
-        return "No relevant external market data found for your query.";
-      }
-
-      // Function: Generate chart or table from app data (simplified)
-      function generateChartTable(appData, query) {
-        if (!appData || appData.length === 0) return "<i>No app data available to generate chart or table.</i>";
-
-        if (query.toLowerCase().includes("table")) {
-          var html = "<table border='1' cellpadding='4' cellspacing='0' style='border-collapse: collapse; width: 100%;'>";
-          let obj = appData[0];
-          html += "<thead><tr>";
-          obj.columns.forEach(col => html += `<th>${col}</th>`);
-          html += "</tr></thead><tbody>";
-          obj.data.forEach(row => {
-            html += "<tr>";
-            row.forEach(cell => html += `<td>${cell.qText}</td>`);
-            html += "</tr>";
-          });
-          html += "</tbody></table>";
-          return html;
-        } else {
-          let obj = appData[0];
-          if (!obj || obj.columns.length < 2) return "<i>Not enough data to generate chart.</i>";
-
-          let barHtml = `<div style="width:100%;font-size: 0.9em;">`;
-          let maxVal = 0;
-          let rows = obj.data;
-          rows.forEach(r => {
-            let val = parseFloat(r[1].qNum);
-            if (!isNaN(val) && val > maxVal) maxVal = val;
-          });
-          rows.forEach(r => {
-            let label = r[0].qText;
-            let val = parseFloat(r[1].qNum);
-            if (isNaN(val)) val = 0;
-            let widthPercent = maxVal > 0 ? (val / maxVal) * 100 : 0;
-            barHtml += `<div style="margin-bottom:6px;">
-              <div style="font-weight:600;">${label} (${val})</div>
-              <div style="background:#0078d4; height: 18px; width: ${widthPercent}%; border-radius: 3px;"></div>
-            </div>`;
-          });
-          barHtml += `</div>`;
-          return barHtml;
-        }
-      }
-
-      // Function: Send user query + data + preprompt to OpenAI API
-      async function callOpenAI(queryText, appDataSummary, selectedRole) {
-        try {
-          let rolePrompt = "";
-          switch (selectedRole) {
-            case "analyst":
-              rolePrompt = "You are a Qlik Sense data analyst assistant.";
-              break;
-            case "hr":
-              rolePrompt = "You are a human resources assistant.";
-              break;
-            default:
-              rolePrompt = "You are a helpful assistant.";
-          }
-
-          let summaryText = "";
-          if (appDataSummary && appDataSummary.length > 0) {
-            summaryText = "App data objects:\n";
-            appDataSummary.forEach(obj => {
-              summaryText += `- ${obj.title}: ${obj.data.length} rows, ${obj.columns.length} cols\n`;
+            // Fetch app data on initialization
+            $scope.$watch('layout', function(newVal) {
+                if (newVal) {
+                    fetchAppData();
+                    initializeChatbot();
+                }
             });
-          } else {
-            summaryText = "No app data available.";
-          }
 
-          let messages = [
-            { role: "system", content: rolePrompt + " Use provided data carefully to answer user questions." },
-            { role: "user", content: "Here is a summary of app data:\n" + summaryText },
-            { role: "user", content: "User question: " + queryText }
-          ];
+            function fetchAppData() {
+                // Get app info
+                app.getAppLayout().then(function(layout) {
+                    $scope.appName = layout["layout"].qTitle || 'QlikSense App';
+                    $scope.$apply();
+                });
 
-          const response = await fetch("https://api.openai.com/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: "Bearer " + OPENAI_API_KEY,
-            },
-            body: JSON.stringify({
-              model: "gpt-4",
-              messages: messages,
-              temperature: 0.7,
-              max_tokens: 1000
-            }),
-          });
+                // Create hypercube to fetch all app data
+                const hypercubeDef = {
+                    qDimensions: [],
+                    qMeasures: [],
+                    qInitialDataFetch: [{
+                        qTop: 0,
+                        qLeft: 0,
+                        qHeight: 1000,
+                        qWidth: 50
+                    }]
+                };
 
-          if (!response.ok) {
-            throw new Error("OpenAI API error: " + response.statusText);
-          }
+                // Get all fields and create dimensions/measures
+                app.getList('FieldList').then(function(reply) {
+                    console.log("reply", reply.layout.qFieldList.qItems);
+                    const fields = reply.layout.qFieldList.qItems;
 
-          const json = await response.json();
-          const answer = json.choices && json.choices.length > 0 ? json.choices[0].message.content : "Sorry, no answer received.";
-          return answer;
-        } catch (err) {
-          return "Error fetching AI response: " + err.message;
-        }
-      }
+                    fields.forEach(function(field, index) {
+                        if (index < 20) {
+                            if (field.qCardinal < 100) {
+                                hypercubeDef.qDimensions.push({
+                                    qDef: {
+                                        qFieldDefs: [field.qName],
+                                        qSortCriterias: [{
+                                            qSortByState: 1,
+                                            qSortByAscii: 1
+                                        }]
+                                    }
+                                });
+                            } else {
+                                hypercubeDef.qMeasures.push({
+                                    qDef: {
+                                        qDef: `Sum([${field.qName}])`,
+                                        qLabel: field.qName
+                                    }
+                                });
+                            }
+                        }
+                    });
 
-      // Function: Perform Qlik selections via Capability API based on chatbot commands
-      async function performQlikCommand(commandText) {
-        try {
-          commandText = commandText.toLowerCase();
-
-          if (commandText.includes("clear selections")) {
-            await app.clearAll();
-            return "All selections cleared.";
-          }
-
-          let filterMatch = commandText.match(/filter (.+?) to (.+)/);
-          if (filterMatch) {
-            let field = filterMatch[1];
-            let value = filterMatch[2];
-            await app.field(field).selectValues([{ qText: value }], true, true);
-            return `Filtered Field "${field}" to "${value}".`;
-          }
-
-          let selectMatch = commandText.match(/select (.+?) (.+)/);
-          if (selectMatch) {
-            let field = selectMatch[1];
-            let value = selectMatch[2];
-            await app.field(field).selectValues([{ qText: value }], true, true);
-            return `Selected "${value}" in field "${field}".`;
-          }
-
-          return null;
-        } catch (e) {
-          return "Error performing Qlik command: " + e.message;
-        }
-      }
-
-      // Process user input, fetch data, call AI, handle Qlik commands, generate responses
-      async function handleUserQuery(query) {
-        appendMessage(query, "user", userName);
-        let loadingIndicator = showLoading();
-
-        try {
-          let appDataSummary = await fetchAllObjectsData();
-          let qlikCommandResponse = await performQlikCommand(query);
-          if (qlikCommandResponse) {
-            removeLoading(loadingIndicator);
-            appendMessage(qlikCommandResponse, "bot");
-            return;
-          }
-          let comparison = compareMarketData(appDataSummary, query);
-          let lowerQuery = query.toLowerCase();
-          let chartContent = null;
-          if (lowerQuery.includes("generate chart") || lowerQuery.includes("generate table") || lowerQuery.includes("show chart") || lowerQuery.includes("show table")) {
-            chartContent = generateChartTable(appDataSummary, query);
-          }
-          let selectedRole = roleSelect.val();
-          let aiAnswer = await callOpenAI(query + "\n\n" + comparison, appDataSummary, selectedRole);
-          removeLoading(loadingIndicator);
-          appendMessage(aiAnswer, "bot");
-          if (chartContent) {
-            let chartMsg = $(`<div class="chat-message bot" style="clear:both;">${chartContent}</div>`);
-            chatbotBody.append(chartMsg);
-            scrollChatBottom();
-            chatHistory.push({ role: "bot", text: chartContent, timestamp: new Date(), userName: "Chatbot" });
-          }
-        } catch (err) {
-          removeLoading(loadingIndicator);
-          appendMessage("An error occurred: " + err.message, "bot");
-        }
-      }
-
-      // Send message from input box
-      function sendMessage() {
-        var msg = inputBox.val().trim();
-        if (msg === "") return;
-        inputBox.val("");
-        handleUserQuery(msg);
-      }
-
-      // Event bindings
-      sendBtn.on("click", sendMessage);
-      inputBox.on("keypress", function (e) {
-        if (e.which === 13) {
-          e.preventDefault();
-          sendMessage();
-        }
-      });
-
-      // Voice input using Web Speech API
-      var recognition = null;
-      var recognizing = false;
-
-      try {
-        recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
-      } catch (e) {
-        recognition = null;
-      }
-
-      if (recognition) {
-        recognition.lang = "en-US";
-        recognition.interimResults = false;
-        recognition.maxAlternatives = 1;
-
-        recognition.onstart = function () {
-          recognizing = true;
-          voiceBtn.css("background", "#005a9e");
-        };
-        recognition.onend = function () {
-          recognizing = false;
-          voiceBtn.css("background", "#0078d4");
-        };
-        recognition.onerror = function (event) {
-          recognizing = false;
-          voiceBtn.css("background", "#0078d4");
-          appendMessage("Voice recognition error: " + event.error, "bot");
-        };
-        recognition.onresult = function (event) {
-          if (event.results.length > 0) {
-            let transcript = event.results[0][0].transcript;
-            inputBox.val(transcript);
-            sendMessage();
-          }
-        };
-
-        voiceBtn.on("mousedown touchstart", function () {
-          if (!recognizing) recognition.start();
-        });
-        voiceBtn.on("mouseup touchend", function () {
-          if (recognizing) recognition.stop();
-        });
-      } else {
-        voiceBtn.attr("disabled", true);
-        voiceBtn.attr("title", "Voice input not supported in this browser");
-        voiceBtn.css("background", "#ccc");
-      }
-
-      // Download chat history to PDF with jsPDF
-      downloadBtn.on("click", async function () {
-        if (chatHistory.length === 0) {
-          alert("No chat history available.");
-          return;
-        }
-        try {
-          const { jsPDF } = await loadJsPDF();
-          let doc = new jsPDF();
-          doc.setFontSize(14);
-          doc.text("Qlik Sense Chat History", 10, 15);
-          doc.setFontSize(10);
-          doc.text("App: " + (container.find(".app-name").text() || "Qlik Sense"), 10, 23);
-          doc.text("Date: " + new Date().toLocaleString(), 10, 30);
-
-          let y = 40;
-          chatHistory.forEach(msg => {
-            let prefix = msg.role === "user" ? `${msg.userName} (You):` : "Chatbot:";
-            let lines = doc.splitTextToSize(prefix + " " + msg.text, 180);
-            if (y + (lines.length * 7) > 280) {
-              doc.addPage();
-              y = 10;
+                    // Create hypercube object
+                    app.createCube(hypercubeDef).then(function(model) {
+                        model.getLayout().then(function(layout) {
+                            console.log("data-layout", layout);
+                            hypercubeData = {
+                                dimensions: layout.qHyperCube.qDimensionInfo,
+                                measures: layout.qHyperCube.qMeasureInfo,
+                                data: layout.qHyperCube.qDataPages[0] ? layout.qHyperCube.qDataPages[0].qMatrix : []
+                            };
+                        });
+                    });
+                });
             }
-            doc.text(lines, 10, y);
-            y += lines.length * 7;
-          });
 
-          doc.save("qliksense-chat-history.pdf");
-        } catch (e) {
-          alert("Error generating PDF: " + e.message);
-        }
-      });
+            // Process object data
+            const objects = $scope.$parent.layout.props.objects;
+            console.log(objects);
 
-      // Initialize chatbot closed and show welcome message
-      toggleChatbot(false);
-      appendMessage("Hello! I'm your Qlik Sense chatbot. Ask me anything about your data or app.", "bot");
-    },
-  };
+            const elements = objects.split(',').map(item => item.trim());
+            const myArrayObjects = [];
+            elements.forEach(element => myArrayObjects.push(element));
+
+            const fetchDataAndProcess = async (objectID) => {
+                const jsonDataArray = [];
+
+                try {
+                    const model = await app.getObject(objectID);
+                    const layout = model.layout;
+                    console.log(model);
+
+                    if (!layout.qHyperCube) {
+                        return [];
+                    }
+
+                    const totalDimensions = layout.qHyperCube.qDimensionInfo.length;
+                    const totalMeasures = layout.qHyperCube.qMeasureInfo.length;
+                    const totalColumns = totalDimensions + totalMeasures;
+
+                    if (totalColumns === 0) return [];
+
+                    const totalRows = layout.qHyperCube.qSize.qcy;
+                    const pageSize = 500;
+                    const totalPages = Math.min(Math.ceil(totalRows / pageSize), 5);
+
+                    const headers = layout.qHyperCube.qDimensionInfo
+                        .map(d => d.qFallbackTitle)
+                        .concat(layout.qHyperCube.qMeasureInfo.map(m => m.qFallbackTitle))
+                        .filter(h => h !== undefined);
+
+                    for (let currentPage = 0; currentPage < totalPages; currentPage++) {
+                        const qTop = currentPage * pageSize;
+                        const qHeight = Math.min(pageSize, totalRows - qTop);
+
+                        if (qHeight <= 0) break;
+
+                        const dataPages = await model.getHyperCubeData('/qHyperCubeDef', [{
+                            qTop,
+                            qLeft: 0,
+                            qWidth: totalColumns,
+                            qHeight
+                        }]);
+
+                        dataPages[0].qMatrix.forEach(data => {
+                            const jsonData = {};
+                            headers.forEach((header, index) => {
+                                jsonData[header] = data[index]?.qText || null;
+                            });
+                            jsonDataArray.push(jsonData);
+                        });
+                    }
+                } catch (error) {
+                    console.warn(`Error fetching data for object ${objectID}:`, error);
+                    return [];
+                }
+                return jsonDataArray;
+            };
+
+
+            myArrayObjects.forEach(function(objectID) {
+                fetchDataAndProcess(objectID).then(jsonDataArray => {
+                    //console.log(jsonDataArray);
+                    allObjData.push(jsonDataArray);
+                    sursa = JSON.stringify(allObjData);
+                    console.log("all Objects Data in string", sursa);
+                }).catch(error => {
+                    console.error("Error fetching data:", error);
+                });
+            });
+
+
+            function initializeChatbot() {
+                const $chatbot = $element.find('.chatbot-container');
+                const $toggle = $element.find('.chatbot-toggle');
+                const $close = $element.find('.chatbot-close');
+                const $sendBtn = $element.find('.send-button');
+                const $input = $element.find('.chat-input');
+                const $voiceBtn = $element.find('.voice-button');
+                const $roleSelect = $element.find('.role-select');
+                const $downloadBtn = $element.find('.download-history');
+
+                // Toggle chatbot
+                $toggle.on('click', function() {
+
+                    $chatbot.addClass('active');
+                    $input.focus();
+                });
+
+                // Close chatbot
+                $close.on('click', function() {
+                    $chatbot.removeClass('active');
+                });
+
+                // Send message
+                $sendBtn.on('click', sendMessage);
+                $input.on('keypress', function(e) {
+                    if (e.which === 13) {
+                        sendMessage();
+                    }
+                });
+
+                // Voice input
+                $voiceBtn.on('click', toggleVoiceInput);
+
+                // Role selection
+                $roleSelect.on('change', function() {
+                    selectedRole = $(this).val();
+                    addMessage('system', `Role changed to: ${selectedRole}`);
+                });
+
+                // Download history
+                $downloadBtn.on('click', downloadChatHistory);
+
+                // Initialize with welcome message
+                addMessage('bot', `Hello! I'm your AI assistant for ${$scope.appName || 'this QlikSense app'}. I can help you analyze your data and create interactive visualizations. Try asking me to "create a chart" or "show me a graph"!`);
+            }
+
+            function sendMessage() {
+                const $input = $element.find('.chat-input');
+                const message = $input.val().trim();
+
+                if (!message) return;
+
+                // Add user message
+                addMessage('user', message);
+                $input.val('');
+
+                // Show typing indicator
+                showTypingIndicator();
+
+                // Send to AI API
+                processWithAI(message);
+            }
+
+            function detectChartRequest(query) {
+                const lowerQuery = query.toLowerCase();
+                return chartKeywords.some(keyword => lowerQuery.includes(keyword));
+            }
+
+            async function processWithAI(query) {
+                MainData.push(hypercubeData);
+
+                console.log(query);
+
+          
+            const decryptedKey = "key";
+
+                const baseUrl = " openURL";
+
+
+                let model = "model";
+                let context = '4o';
+              
+
+                const endpoint = `deployments/${model}/chat/completions`;
+                const url = `${baseUrl}${endpoint}`;
+                const temp = 0.2; // Ranges 0-2
+
+                let Data = JSON.stringify(hypercubeData);
+                let prompt = `You are ${selectedRole}, You are a highly skilled health insurance business analyst. Utilize the JSON data provided below after 'data:', which includes information claims data. Your primary objective is to analyze this data and answer the query asked after the data segment in query:<> format in this message. Always emphasize clarity and correctness in your answers to provide the best possible insights.  response should be pointwise in use html elements`;
+
+                switch (selectedRole) {
+                    case 'Analyst':
+                        prompt += ` As a skilled analyst, focus on data trends, patterns, and statistical insights.response should be pointwise in use html elements`;
+                        break;
+                    case 'HR':
+                        prompt += ` As an HR professional, emphasize employee-related insights, performance metrics, and organizational trends.response should be pointwise in use html elements`;
+                        break;
+                    case 'Manager':
+                        prompt += ` As a manager, provide strategic insights, performance summaries, and actionable recommendations. response should be pointwise in use html elements`;
+                        break;
+                    case 'Executive':
+                        prompt += ` As an executive, focus on high-level strategic insights, KPIs, and business impact. response should be pointwise in use html elements`;
+                        break;
+                }
+                const isChartRequest = detectChartRequest(query);
+				
+						
+						if(query.toLowerCase().startsWith("@create excel")){
+						    prompt = `You are ${selectedRole}, a data visualization expert. Based on the QlikSense data provided, create a chart configuration for the user's request.
+						 IMPORTANT: Respond with a JSON object containing:
+						 1) "data": A complete configuration object (in JSON format)
+						for @create excel use below format: 
+ 
+						 {    "data": [{ "Name": "Alice", "Age": 30, "City": "New York" },
+								 			            { "Name": "Bob", "Age": 25, "City": "Los Angeles" }
+														]
+								 
+								
+								
+								}`;
+								}
+
+                if (isChartRequest) {
+                    prompt = `You are ${selectedRole}, a data visualization expert. Based on the QlikSense data provided, create a chart configuration for the user's request.
+
+					
+
+                    IMPORTANT: Respond with a JSON object containing:
+                    1. "message": A brief explanation of the chart
+                    2. "chartConfig": A complete ECharts configuration object (in JSON format)
+                    3. "chartType": The type of chart (bar, line, pie, scatter, stacked bar, area, boxplot, radar, geo, tree, treemap, sankey, funnel, gauge))
+
+
+                    The chartConfig should include:
+                    - xAxis: with type and data
+                    - yAxis: with type
+                    - series: with type, data, and name
+
+                    Use the actual data from the provided dataset. Make the chart interactive with hover effects and click handlers.
+
+                    Example format:
+                    {
+                        "message": "Here's a bar chart showing...",
+                        "chartConfig": {
+                            "xAxis": {
+                                "type": "category",
+                                "data": ["Label1", "Label2"]
+                            },
+                            "yAxis": {
+                                "type": "value"
+                            },
+                            "series": [{
+                                "data": [{value: 14109.47, name: 'TN'}],
+                                "type": "bar || line || pie || scatter || stacked bar || area || boxplot || radar || geo || tree || treemap || sankey || funnel || gauge",
+                                "name": "Dataset Label"
+                            }]
+                        },
+                        "chartType": "bar || line || pie || scatter || stacked bar || area || boxplot || radar || geo || tree || treemap || sankey || funnel || gauge"
+                    }
+
+                    for Geo map use following format :
+
+
+                      option = {
+                            title: {
+
+
+                              left: 'right'
+                            },
+                            tooltip: {
+                              trigger: 'item',
+                              showDelay: 0,
+                              transitionDuration: 0.2
+                            },
+                            visualMap: {
+                              left: 'right',
+                              min: 500000,
+                              max: 38000000,
+                              inRange: {
+                                color: [
+                                  '#313695',
+                                  '#4575b4',
+                                  '#74add1',
+                                  '#abd9e9',
+                                  '#e0f3f8',
+                                  '#ffffbf',
+                                  '#fee090',
+                                  '#fdae61',
+                                  '#f46d43',
+                                  '#d73027',
+                                  '#a50026'
+                                ]
+                              },
+                              text: ['High', 'Low'],
+                              calculable: true
+                            },
+                            toolbox: {
+                              show: true,
+                              //orient: 'vertical',
+                              left: 'left',
+                              top: 'top',
+                              feature: {
+                                dataView: { readOnly: false },
+                                restore: {},
+                                saveAsImage: {}
+                              }
+                            },
+                            series: [
+                              {
+                                name: 'Country Data ',
+                                type: 'map',
+                                roam: true,
+                                map: 'USA',
+                                emphasis: {
+                                  label: {
+                                    show: true
+                                  }
+                                },
+                                data: [
+                                  { name: 'Alabama', value: 4822023 },
+
+
+                                ]
+                              }
+                            ]
+                          }
+						  
+				
+						  
+						
+                    `;
+                }
+
+                try {
+
+                    console.log("all Objects Data ", sursa);
+
+
+                    const response = await fetch(url, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${decryptedKey}`
+                        },
+                        body: JSON.stringify({
+                            model: model,
+                            messages: [{
+                                role: "user",
+                                content: `${prompt} data:${sursa} query:${query}`
+                            }],
+                            temperature: temp,
+                            max_tokens: 2000,
+                            response_format: isChartRequest ? {
+                                type: "json_object"
+                            } : undefined
+                        })
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+
+                    const data = await response.json();
+                    let aiResponse = data.choices[0].message.content;
+					
+					/* if (aiResponse.includes('```json') && aiResponse.includes('```')) {
+						// Remove the ```json marker
+						aiResponse = aiResponse.replace('```json', '').replace('```', '');
+						
+						// Trim whitespace
+						aiResponse = aiResponse.trim();
+					}*/
+					
+					  //  aiResponse = aiResponse.trim();
+
+						if (aiResponse.includes('```json') && aiResponse.includes('```')) {
+							// Remove both markers globally
+							   aiResponse = aiResponse.replace(/```json|```/g, '').trim(); // remove first 5 chars
+        // Remove the ending ```
+							//aiResponse = aiResponse.substring(0, str.length - 3);
+							// Trim again
+							aiResponse = aiResponse.trim();
+						}
+
+						try {
+							var excelDataParse = JSON.parse(aiResponse);
+							console.log(excelDataParse);
+						} catch (e) {
+							console.error('Error parsing JSON:', e);
+						}
+ 					
+                    hideTypingIndicator();
+
+                    if (isChartRequest) {
+                        try {
+                            const chartResponse = JSON.parse(aiResponse);
+                            lastChartConfig = chartResponse.chartConfig; // Store the chart config
+                            const messageText = chartResponse.message || 'Here\'s your chart:';
+                            addMessage('bot', messageText, chartResponse.chartConfig, chartResponse.chartType);
+
+                        } catch (parseError) {
+                            console.error('Error parsing chart response:', parseError);
+                            addMessage('bot', 'I encountered an error generating the chart. Here\'s the analysis instead: ' + aiResponse);
+                        }
+                    }else if (query.toLowerCase().startsWith("@create excel")) {
+                        const excelQuery = query.substring("@create excel".length).trim(); // Extract the query after the command
+                      getExcelData(excelQuery, excelDataParse); // Function to fetch data for Excel
+                     
+                        hideTypingIndicator();
+                        addMessage('bot', 'Generating Excel file...');
+                        return; // Stop further processing
+                    } else {
+                        addMessage('bot', aiResponse);
+                    }
+
+                } catch (error) {
+                    console.error('Error calling AI API:', error);
+                    hideTypingIndicator();
+                    addMessage('bot', 'I apologize, but I encountered an error processing your request. Please try again.');
+                }
+            }
+
+            // **Function to Fetch Data for Excel**
+            async function getExcelData(query, excelDataParse) {
+						 import('https://cdn.sheetjs.com/xlsx-latest/package/xlsx.mjs')
+                .then(XLSX => {
+                    // XLSX is now available here
+                    console.log("XLSX (ES Module):", XLSX);
+
+                    // Example usage (replace with your actual data and logic)
+                    const data = excelDataParse.data;
+                    const worksheet = XLSX.utils.json_to_sheet(data);
+                    const workbook = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(workbook, worksheet, "Sheet1");
+                    const excelData = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+                    const blob = new Blob([new Uint8Array(excelData)], { type: 'application/octet-stream' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'data.xlsx';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+
+                })
+                .catch(error => {
+                    console.error("Error loading XLSX (ES Module):", error);
+                });
+            }
+
+
+            function addMessage(sender, message, chartConfig = null, chartType = null) {
+                const $messages = $element.find('.chat-messages');
+                const timestamp = new Date().toLocaleTimeString();
+                const messageId = 'msg_' + Date.now();
+
+                let messageClass = sender === 'user' ? 'user-message' : 'bot-message';
+                let icon = sender === 'user' ? '\ud83d\udc64' : '\ud83e\udd16';
+                let name = sender === 'user' ? currentUser : 'AI Assistant';
+
+                if (sender === 'system') {
+                    messageClass = 'system-message';
+                    icon = '\u2699\ufe0f';
+                    name = 'System';
+                }
+
+
+                message = message.replace(/```html/g, '').replace(/```/g, '').trim();
+
+                let messageHtml = `
+                    <div class="message ${messageClass}" id="${messageId}">
+                        <div class="message-content">
+                            <div class="message-header">
+                                <span class="${sender}-icon">${icon}</span>
+                                <span class="${sender}-name">${name}</span>
+                                <span class="timestamp">${timestamp}</span>
+                            </div>
+                            <div class="message-text">${message}</div>
+                            ${chartConfig ? '<div class="chart-container" id="chart_' + messageId + '"></div>' : ''}
+                            <div class="hear-responce ${sender}" id="chartheading_${messageId}">
+                                <button class="speak-button" >
+                                    <i class="fas fa-volume-up"></i>
+                                </button>
+                                <button class="copy-response" >
+                                    <i class="fas fa-copy"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+
+                $messages.append(messageHtml);
+                $messages.scrollTop($messages[0].scrollHeight);
+
+                // Generate chart if chartConfig is provided
+                if (chartConfig) {
+                    currentChartContainerId = `chart_${messageId}`; // Store the container ID
+
+                    chartcontainerheader = `chartheading_${messageId}`;
+                    setTimeout(() => {
+                        generateChart(currentChartContainerId, chartcontainerheader, chartConfig, chartType);
+                    }, 100);
+                }
+
+                // Add to chat history
+                chatHistory.push({
+                    sender: sender,
+                    message: message,
+                    timestamp: timestamp,
+                    chartConfig: chartConfig
+                });
+            }
+
+            function generateChart(containerId, chartcontainerheader, chartConfig, chartType) {
+
+                const container = document.getElementById(containerId);
+                const containerheader = document.getElementById(chartcontainerheader);
+                if (!container) {
+                    console.error('Chart container not found:', containerId);
+                    return;
+                }
+
+                // Clear previous content
+                $(container).empty();
+
+                const $buttonsHtml = $(`
+
+                        <button class="go-back-button"><i class="fas fa-arrow-left"></i></button>
+
+                `);
+
+                // Add "Go Back" and "Export to Excel" buttons using jQuery
+
+
+                // Initialize chart
+                if (chartConfig.series[0].type == 'map') {
+                    echarts.registerMap('USA', dataObj);
+                }
+                const myChart = echarts.init(container);
+
+
+                // Add tooltip for hover effect
+                chartConfig.tooltip = {
+                    trigger: 'item'
+                    //  formatter: '{a} <br/>{b} : {c} ({d}%)' // Customize as needed
+                };
+
+                // Set chart options
+                myChart.setOption(chartConfig);
+
+                // Add click event listener for drilldown
+                myChart.on('click', function(params) {
+
+                    $(containerheader).append($buttonsHtml);
+
+                    // Store the current chart config as the previous config
+                    previousChartConfig = JSON.parse(JSON.stringify(chartConfig));
+
+                    // Handle drilldown logic here - Modify chart directly
+                    if (lastChartConfig && lastChartConfig.series) {
+                        // Example: Filter data based on the clicked data point
+
+
+                        const newData = lastChartConfig.series.map((series, i) => {
+                            if (series.type == 'line') {
+                                return {
+                                    ...series,
+                                    data: series.data.filter(item => item == params.value) // Example filter
+                                };
+                            } else if (series.type == 'scatter') {
+                                return {
+                                    ...series,
+                                    data: series.data.filter(item => item.value[1] == params.value[1]) // Example filter
+                                };
+                            } else {
+                                return {
+                                    ...series,
+                                    data: series.data.filter(item => item.value == params.value) // Example filter
+                                };
+                            }
+                        });
+
+                        //const newData = lastChartConfig.series.data.filter(item => item === params.value);
+
+                        // Update the chart options with the filtered data
+                        const newChartConfig = {
+                            ...lastChartConfig,
+                            series: newData
+                        };
+
+                        chartConfig = newChartConfig; // Update the chartConfig
+                        myChart.setOption(newChartConfig);
+                    }
+                });
+
+                // "Go Back" button functionality using jQuery
+                let headerID = "#" + chartcontainerheader;
+
+                $(document).on("click", `${headerID} .go-back-button`, function() {
+                    console.log("back button clicked");
+                    // $(container).find('.go-back-button').on('click', function() {
+                    if (previousChartConfig) {
+
+                        myChart.setOption(previousChartConfig);
+
+                        if (previousChartConfig.series[0].type == 'bar') {
+                            const resizeObserver = new ResizeObserver(() => {
+                                myChart.resize();
+                            });
+                        }
+                        chartConfig = previousChartConfig; // Restore the chartConfig
+                        previousChartConfig = null; // Clear the previous config
+                    }
+                    $(this).remove();
+                });
+
+                // "Export to Excel" button functionality using jQuery
+
+                // Save chart instance
+                chartInstances[containerId] = myChart;
+
+                // Add resize observer for responsiveness
+                const resizeObserver = new ResizeObserver(() => {
+                    myChart.resize();
+                });
+                resizeObserver.observe(container);
+
+                // **Add Download Chart Button**
+                const $downloadButton = $('<button>')
+                    .addClass('download-chart-button')
+                    .html('<i class="fas fa-download"></i> Download Chart')
+                    .on('click', function() {
+                        downloadChartImage(containerId);
+                    });
+                $(container).append($downloadButton);
+            }
+
+            // **Function to Download Chart as Image**
+            function downloadChartImage(containerId) {
+                const container = document.getElementById(containerId);
+                const chart = chartInstances[containerId];
+
+                if (!chart) {
+                    console.error('Chart instance not found:', containerId);
+                    return;
+                }
+
+                const imgData = chart.getDataURL({
+                    type: 'png',
+                    pixelRatio: 2, // Adjust for higher resolution
+                    backgroundColor: '#fff' // Set background color
+                });
+
+                const link = document.createElement('a');
+                link.href = imgData;
+                link.download = 'chart.png'; // Filename
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            }
+
+            function showTypingIndicator() {
+                const $messages = $element.find('.chat-messages');
+                const typingHtml = `
+                    <div class="message typing-indicator">
+                        <div class="message-content">
+                            <div class="typing-animation">
+                                <span></span>
+                                <span></span>
+                                <span></span>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                $messages.append(typingHtml);
+                $messages.scrollTop($messages[0].scrollHeight);
+            }
+
+            function hideTypingIndicator() {
+                $element.find('.typing-indicator').remove();
+            }
+
+            function toggleVoiceInput() {
+                if (!recognition) {
+                    alert('Voice recognition is not supported in your browser.');
+                    return;
+                }
+
+                const $voiceBtn = $element.find('.voice-button');
+
+                if (isListening) {
+                    recognition.stop();
+                    isListening = false;
+                    $voiceBtn.removeClass('listening');
+                } else {
+                    recognition.start();
+                    isListening = true;
+                    $voiceBtn.addClass('listening');
+                }
+
+                recognition.onresult = function(event) {
+                    const transcript = event.results[0][0].transcript;
+                    $element.find('.chat-input').val(transcript);
+                    isListening = false;
+                    $voiceBtn.removeClass('listening');
+                };
+
+                recognition.onerror = function(event) {
+                    console.error('Speech recognition error:', event.error);
+                    isListening = false;
+                    $voiceBtn.removeClass('listening');
+                };
+            }
+
+            function downloadChatHistory() {
+                /*const dataStr = JSON.stringify(chatHistory, null, 2);
+                const dataUri = 'data:application/json;charset=utf-8,' + encodeURIComponent(dataStr);
+
+                const exportFileDefaultName = `chat_history_${new Date().toISOString().split('T')[0]}.json`;
+
+                const linkElement = document.createElement('a');
+                linkElement.setAttribute('href', dataUri);
+                linkElement.setAttribute('download', exportFileDefaultName);
+                linkElement.click();
+
+
+                */
+
+
+                const pdfContent = chatHistory.map(msg =>
+                    `[${msg.timestamp}] ${msg.user}: ${msg.message}`
+                ).join('\n\n');
+
+                // Create and download file
+                const blob = new Blob([pdfContent], {
+                    type: 'text/plain'
+                });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `chatbot_history_${new Date().toISOString().split('T')[0]}.txt`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            }
+
+
+
+            //response voice start code
+            $(document).ready(function() {
+                let isSpeaking = false;
+                let speechSynthesis = window.speechSynthesis;
+                let utterance;
+                speechSynthesis.cancel();
+                $(document).on('click', '.speak-button', function() {
+                    var text = $(this).parent().prev().text().trim();
+                    if (isSpeaking) {
+                        stopSpeech(this);
+                    } else {
+                        startSpeech(text, this);
+                    }
+                });
+
+                function startSpeech(text, $this) {
+                    // Get the text from the textarea
+
+
+                    // Check if the browser supports speech synthesis
+                    if ('speechSynthesis' in window) {
+                        // Create a new speech synthesis utterance
+                        var utterance = new SpeechSynthesisUtterance(text);
+                        isSpeaking = true;
+
+                        // Optionally set properties like voice, pitch, and rate
+                        utterance.pitch = 1; // Range: 0 to 2
+                        utterance.rate = 1; // Range: 0.1 to 10
+                        utterance.volume = 1; // Range: 0 to 1
+
+                        // Speak the text
+                        window.speechSynthesis.speak(utterance);
+
+                        $($this).html('<i class="fa fa-ban" aria-hidden="true"></i>');
+                        $($this).addClass("active-speech");
+
+
+                        utterance.onend = function() {
+                            isSpeaking = false;
+                            $($this).html('<i class="fa fa-volume-up" aria-hidden="true"></i>');
+                            $($this).removeClass("active-speech");
+                        }
+
+                    } else {
+                        alert('Please enter some text to speak.');
+                    }
+                }
+
+                function stopSpeech($this) {
+                    if (isSpeaking) {
+                        speechSynthesis.cancel();
+                        isSpeaking = false;
+                        $($this).html('<i class="fa fa-volume-up" aria-hidden="true"></i>');
+                        $($this).removeClass("active-speech");
+
+                    }
+                }
+                $(window).on('beforeunload', function() {
+                    stopSpeech();
+                });
+            });
+
+
+            $(document).on("click", ".copy-response", function() {
+                // Get the parent div
+                const parentDiv = $(this).parent().prev();
+
+                // Get all text inside the child elements of the parent div
+                const textToCopy = parentDiv.text().trim();
+
+                // Create a temporary textarea to hold the text to copy
+                const tempInput = $('<textarea>').val(textToCopy).appendTo('body').select();
+
+                // Copy the text
+                document.execCommand('copy');
+
+                // Remove the temporary textarea
+                tempInput.remove();
+
+                // Optional: Alert the user that the text has been copied
+                //console.log('Text copied to clipboard!');
+            });
+
+
+
+
+            $(document).ready(function() {
+                const keywords = [
+                    "@generate the chart",
+                    "@create excel"
+                ];
+
+                const $input = $('#commandInput');
+                const $suggestionBox = $('#suggestionBox');
+
+                $input.on('input', function() {
+                    const val = $(this).val();
+                    const lastChar = val.slice(-1);
+                    // Show suggestions when last char is '@'
+                    if (lastChar === '@') {
+                        showSuggestions('');
+                    } else if (val.includes('@')) {
+                        // Get the part after '@' for filtering
+                        const atIndex = val.lastIndexOf('@');
+                        const query = val.slice(atIndex).toLowerCase();
+                        showSuggestions(query);
+                    } else {
+                        $suggestionBox.hide();
+                    }
+                });
+
+                function showSuggestions(query) {
+                    const filtered = keywords.filter(k => k.toLowerCase().startsWith(query));
+                    if (filtered.length === 0) {
+                        $suggestionBox.hide();
+                        return;
+                    }
+                    $suggestionBox.empty();
+                    filtered.forEach(item => {
+                        const $item = $('<div class="suggestion-item"></div>').text(item);
+                        $item.on('click', function() {
+                            selectSuggestion(item);
+                        });
+                        $suggestionBox.append($item);
+                    });
+                    // Position the suggestion box below input
+                    const offset = $input.offset();
+                    $suggestionBox.show();
+                }
+
+                function selectSuggestion(suggestion) {
+                    const val = $input.val();
+                    const atIndex = val.lastIndexOf('@');
+                    const newVal = val.slice(0, atIndex) + suggestion + ' ';
+                    $input.val(newVal);
+                    $suggestionBox.hide();
+                    $input.focus();
+                }
+            });
+
+
+            $('#commandInput').on('change', function() {
+                const command = $(this).val().trim();
+                if (command.startsWith("@generate the chart")) {
+                    // Generate chart
+                } else if (command.startsWith("@create excel")) {
+                    // Create Excel
+                }
+                // Add more commands as needed
+            });
+
+
+            // Cleanup function
+            $scope.$on('$destroy', function() {
+                // Destroy all chart instances
+                Object.values(chartInstances).forEach(chart => {
+                    if (chart) chart.dispose(); // Use dispose for ECharts
+                });
+                chartInstances = {};
+            });
+        }]
+    };
 });
