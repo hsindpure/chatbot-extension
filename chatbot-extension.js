@@ -128,72 +128,140 @@ define([
             const myArrayObjects = [];
             elements.forEach(element => myArrayObjects.push(element));
 
-            const fetchDataAndProcess = async (objectID) => {
-                const jsonDataArray = [];
+	
+	
+const fetchDataAndProcess = async (objectID) => {
+    const jsonDataArray = [];
+  console.log(objectID);
+    try {
+      const model = await app.getObject(objectID);
+      const layout = model.layout;
+	  //console.log("model",model);
+  
+      if (!layout.qHyperCube) {
+        return []; // No hypercube, no data
+      }
+  
+      const totalDimensions = layout.qHyperCube.qDimensionInfo.length;
+      const totalMeasures = layout.qHyperCube.qMeasureInfo.length;
+      const totalColumns = totalDimensions + totalMeasures;
+  
+      if(totalColumns === 0) return [];
+  
+      const totalRows = layout.qHyperCube.qSize.qcy;
+  
+      const pageSize = 500; // reduced page size for safety
+      const totalPages = Math.min(Math.ceil(totalRows / pageSize), 5); // limit max pages to 5 for max 2500 rows per object
+  
+      const headers = layout.qHyperCube.qDimensionInfo
+                      .map(d => d.qFallbackTitle)
+                      .concat(layout.qHyperCube.qMeasureInfo.map(m => m.qFallbackTitle))
+                      .filter(h => h !== undefined);
+  
+      for (let currentPage = 0; currentPage < totalPages; currentPage++) {
+        const qTop = currentPage * pageSize;
+        const qHeight = Math.min(pageSize, totalRows - qTop);
+  
+        if (qHeight <= 0) break;
+  
+        const dataPages = await model.getHyperCubeData('/qHyperCubeDef', [{
+          qTop,
+          qLeft: 0,
+          qWidth: totalColumns,
+          qHeight
+        }]);
+  
+        dataPages[0].qMatrix.forEach(data => {
+          const jsonData = {};
+          headers.forEach((header, index) => {
+            jsonData[header] = data[index]?.qText || null;
+          });
+          jsonDataArray.push(jsonData);
+        });
+      }
+    } catch (error) {
+      console.warn(`Error fetching data for object ${objectID}:`, error);
+      return [];
+    }
+    return jsonDataArray;
+    
+  };
+  
 
-                try {
-                    const model = await app.getObject(objectID);
-                    const layout = model.layout;
-                    console.log(model);
+  
+		var sheetID = [];
+	  app.getList("sheet", function(reply){
+     sheetID = [];
+	  $.each(reply.qAppObjectList.qItems, function(key, value) {
+	 // console.log("sheet id",value);
 
-                    if (!layout.qHyperCube) {
-                        return [];
-                    }
+	  sheetID.push(value.qInfo.qId);
 
-                    const totalDimensions = layout.qHyperCube.qDimensionInfo.length;
-                    const totalMeasures = layout.qHyperCube.qMeasureInfo.length;
-                    const totalColumns = totalDimensions + totalMeasures;
+//	 console.log("origanl sheet id",sheetID);
 
-                    if (totalColumns === 0) return [];
+	  });
 
-                    const totalRows = layout.qHyperCube.qSize.qcy;
-                    const pageSize = 500;
-                    const totalPages = Math.min(Math.ceil(totalRows / pageSize), 5);
+	  });
+	  
+	  
+	  
+			var Object_ids = [];
+			
+                            var currentSheetId = qlik.navigation.getCurrentSheetId();
+        
+        
+                            app.getAppObjectList( 'sheet', function(reply){  
+                                    $.each(reply.qAppObjectList.qItems, function(key, value) {
+                                       // if(currentSheetId.sheetId==value.qInfo.qId){  
+                                	
+                                        $.each(value.qData.cells, function(k,v){
+                                    	
+                                        //console.log(v);
+                                    	
+                                            Object_ids.push(v.name);
+                                    	
+                                        });
+                                    //  }
+        
+        
+                                 });
+									   
+									   
+									   
+									//  Object_ids = Object_ids.slice(0, 2);
+									
+                                  //Object_ids.push("pTbrRg");
+									   console.log(Object_ids);
+									Object_ids.forEach(function (objectID) {
+										fetchDataAndProcess(objectID).then(jsonDataArray => {
+									
+											allObjData.push(jsonDataArray);
 
-                    const headers = layout.qHyperCube.qDimensionInfo
-                        .map(d => d.qFallbackTitle)
-                        .concat(layout.qHyperCube.qMeasureInfo.map(m => m.qFallbackTitle))
-                        .filter(h => h !== undefined);
+											//console.log("all Obejcets Data", allObjData);
+											let filteredArray = allObjData.filter(arr => arr.length > 0);
+												//console.log("filtered data", filteredArray);
+												sursa = JSON.stringify(filteredArray);
+											console.log("all Obejcets Data", sursa);
+											  
+									  var uniqueData = filteredArray.filter(function(item, index, self) {
+											// Convert object to string for comparison
+											var itemString = JSON.stringify(item);
+											// Check if this is the first occurrence
+											return index === self.findIndex(function(t) {
+												return JSON.stringify(t) === itemString;
+											});
+										});
+											 console.log(JSON.stringify(uniqueData));
+						
 
-                    for (let currentPage = 0; currentPage < totalPages; currentPage++) {
-                        const qTop = currentPage * pageSize;
-                        const qHeight = Math.min(pageSize, totalRows - qTop);
+										}).catch(error => {
+										   // console.error("Error fetching and processing data:", error);
+										});
 
-                        if (qHeight <= 0) break;
-
-                        const dataPages = await model.getHyperCubeData('/qHyperCubeDef', [{
-                            qTop,
-                            qLeft: 0,
-                            qWidth: totalColumns,
-                            qHeight
-                        }]);
-
-                        dataPages[0].qMatrix.forEach(data => {
-                            const jsonData = {};
-                            headers.forEach((header, index) => {
-                                jsonData[header] = data[index]?.qText || null;
+									});
+								
+						
                             });
-                            jsonDataArray.push(jsonData);
-                        });
-                    }
-                } catch (error) {
-                    console.warn(`Error fetching data for object ${objectID}:`, error);
-                    return [];
-                }
-                return jsonDataArray;
-            };
-
-
-            myArrayObjects.forEach(function(objectID) {
-                fetchDataAndProcess(objectID).then(jsonDataArray => {
-                    //console.log(jsonDataArray);
-                    allObjData.push(jsonDataArray);
-                    sursa = JSON.stringify(allObjData);
-                    console.log("all Objects Data in string", sursa);
-                }).catch(error => {
-                    console.error("Error fetching data:", error);
-                });
-            });
 
 
             function initializeChatbot() {
@@ -434,25 +502,46 @@ define([
                     console.log("all Objects Data ", sursa);
 
 
-                    const response = await fetch(url, {
+                   /* const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${decryptedKey}`
+                            'Authorization': `Bearer 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`
                         },
                         body: JSON.stringify({
-                            model: model,
+                            model: "openai/gpt-3.5-turbo",
                             messages: [{
                                 role: "user",
                                 content: `${prompt} data:${sursa} query:${query}`
                             }],
                             temperature: temp,
-                            max_tokens: 2000,
+                            max_tokens: 4000,
                             response_format: isChartRequest ? {
                                 type: "json_object"
                             } : undefined
                         })
-                    });
+                    });*/
+					
+					
+					
+					
+					
+							
+							  
+							         const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+											method: "POST",
+											headers: {
+												"Authorization": "Bearer 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",
+												"Content-Type": "application/json"
+											},
+											body: JSON.stringify({
+												model: "openai/gpt-3.5-turbo",
+												messages: [{ role: "user", content: `${prompt} data:${sursa} query:${query}` }],
+												temperature: 0.3,
+												max_tokens: 2000
+											})
+										});
+
 
                     if (!response.ok) {
                         throw new Error(`HTTP error! status: ${response.status}`);
